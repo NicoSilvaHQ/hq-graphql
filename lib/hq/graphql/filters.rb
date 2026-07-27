@@ -217,10 +217,13 @@ module HQ
           else
             # Rails' WhereClause#merge (used by Relation#merge) deduplicates predicates
             # by column reference, so a second filter on the same column (e.g. LESS_THAN
-            # after GREATER_THAN on a date field) silently drops the first. Using where()
-            # (WhereClause#+) instead concatenates without deduplication.
-            result = filter_scope.where_clause.empty? ? scope : scope.where(filter_scope.where_clause.ast)
-            filter_scope.joins_values.reduce(result) { |s, j| s.joins(j) }
+            # after GREATER_THAN on a date field) silently drops the first. Merge
+            # everything BUT the where clause (joins, left_outer_joins, eager_load,
+            # includes, group, having, etc. all carry over normally via merge), then
+            # add the where clause separately via where() (WhereClause#+), which
+            # concatenates without deduplication.
+            scope = scope.merge(filter_scope.except(:where))
+            filter_scope.where_clause.empty? ? scope : scope.where(filter_scope.where_clause.ast)
           end
         end
       end
