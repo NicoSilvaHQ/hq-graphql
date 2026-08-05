@@ -164,3 +164,9 @@ query {
 - Changelog file modified for standard
 - Ruby version upgraded to 3.4.4
 - In the gemspec file, allow to be used for Rails versions between 6.1 and 8.1.1.
+
+## [5.0.2] 2026-08-03
+
+### Changed
+
+- Subclasses are included in types where the main class is present.
