@@ -7,6 +7,7 @@ module HQ
       :authorize_field,
       :default_object_class,
       :default_scope,
+      :default_search_type,
       :extract_class,
       :resource_lookup,
       :use_experimental_associations,

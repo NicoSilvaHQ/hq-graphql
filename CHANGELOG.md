@@ -170,3 +170,19 @@ query {
 ### Changed
 
 - Subclasses are included in types where the main class is present.
+
+## [5.0.3] 2026-08-18
+
+### Added
+
+- `Resource.search_options`, a macro that registers a dedicated root query field (e.g. `levelSearchOptions`)
+  backed by the resource's model `.search_options`/`.search_options_groups`. The returned type defaults to
+  `HQ::GraphQL.config.default_search_type`, or can be overridden per-resource with `type:`.
+- `HQ::GraphQL.auto_register_search_options!`, which calls `search_options` for every resource whose model
+  already defines `.search_options`, so it rarely needs to be called explicitly per resource. Stateless and
+  safe to call repeatedly -- `Resource#search_options` is idempotent per resource via
+  `@search_options_registered`, set only once its field is actually built. Not wired to any hq-graphql
+  lifecycle hook: when a consuming app's boot process finalizes `root_queries` into real schema fields (e.g.
+  by explicitly building/dumping the schema during initialization, ahead of `HQ::GraphQL::RootQuery`'s own
+  lazy field-building) varies per app, so the app calls this itself at that point. See e.g. agencieshq's
+  `z_graphql_resources_to_reload.rb`.

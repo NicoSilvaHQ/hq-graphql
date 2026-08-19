@@ -210,6 +210,48 @@ module HQ
           mutation_klasses["destroy_#{graphql_name.underscore}"] = build_destroy if destroy
         end
 
+        # search_options registers a dedicated root query field (e.g. `levelSearchOptions`)
+        # backed directly by the model's own `.search_options`/`.search_options_groups`.
+        # Auto-registered by `HQ::GraphQL.load_types!` for any resource whose model_klass
+        # already defines `.search_options`, so this rarely needs to be called explicitly.
+        # Parameters:
+        # field_name => overrides the generated field name
+        # default_limit => cap applied when the caller doesn't pass with: { limit: }
+        # type => the GraphQL type returned; defaults to HQ::GraphQL.config.default_search_type
+        def search_options(field_name: nil, default_limit: 15, type: nil)
+          return if @search_options_registered
+
+          resource = self
+          field_name ||= "#{graphql_name.underscore}_search_options"
+          result_type = type || ::HQ::GraphQL.config.default_search_type
+          raise ArgumentError, "no type given and no default_search_type configured" unless result_type
+
+          def_root field_name, is_array: false, null: false do
+            type result_type, null: false
+
+            argument :query, String, required: false
+            argument :with, ::GraphQL::Types::JSON, required: false
+
+            define_method(:resolve) do |query: nil, with: nil|
+              klass = resource.model_klass
+              opts = (with || {}).deep_symbolize_keys
+
+              scope = klass.search_options(query, organization_id: context[:current_organization]&.id, with: opts)
+              limit = Integer(opts[:limit]) rescue default_limit
+              records = scope.respond_to?(:limit) ? scope.limit(limit).to_a : Array(scope)
+
+              grouped_results =
+                if klass.respond_to?(:search_options_groups)
+                  klass.search_options_groups(records, opts).map { |label, group_records| { label: label, results: group_records } }
+                end
+
+              { results: records, grouped_results: grouped_results }
+            end
+          end
+
+          @search_options_registered = true
+        end
+
         def query(**options, &block)
           @query_object_options = [options, block]
         end
