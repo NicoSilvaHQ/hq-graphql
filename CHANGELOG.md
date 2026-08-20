@@ -186,3 +186,6 @@ query {
   by explicitly building/dumping the schema during initialization, ahead of `HQ::GraphQL::RootQuery`'s own
   lazy field-building) varies per app, so the app calls this itself at that point. See e.g. agencieshq's
   `z_graphql_resources_to_reload.rb`.
+- `Resource.search_options` now remaps results to an `Owner`-prefixed class by id when one exists for the
+  model (e.g. `OwnerLevel` for `Level`), so the owner view is returned instead of the base model instances.
+  Order and the applied limit are preserved.

@@ -218,6 +218,17 @@ module HQ
         # field_name => overrides the generated field name
         # default_limit => cap applied when the caller doesn't pass with: { limit: }
         # type => the GraphQL type returned; defaults to HQ::GraphQL.config.default_search_type
+        #
+        # When an `Owner`-prefixed class exists for the model (e.g. `OwnerLevel` for
+        # `Level`), results are re-fetched through it by id so callers get the owner
+        # view instead of the base model instances. This is a separate class/table
+        # (e.g. a DB-view-backed model), not a subclass, so records are remapped by id
+        # rather than cast in place -- the original order and limit are preserved. If
+        # the base model itself defines `#sub_item_type` or `#abbreviation` (used for
+        # search-suggestion display, when the Owner view can't compute them in SQL),
+        # those override whatever the Owner view returned for that record.
+        OWNER_OVERRIDE_METHODS = %i[sub_item_type abbreviation].freeze
+
         def search_options(field_name: nil, default_limit: 15, type: nil)
           return if @search_options_registered
 
@@ -234,15 +245,49 @@ module HQ
 
             define_method(:resolve) do |query: nil, with: nil|
               klass = resource.model_klass
+              owner_klass = "Owner#{klass.name}".safe_constantize
               opts = (with || {}).deep_symbolize_keys
 
               scope = klass.search_options(query, organization_id: context[:current_organization]&.id, with: opts)
               limit = Integer(opts[:limit]) rescue default_limit
-              records = scope.respond_to?(:limit) ? scope.limit(limit).to_a : Array(scope)
+              is_relation = scope.respond_to?(:limit)
+              limited_scope = is_relation ? scope.limit(limit) : scope
+              primary_key = klass.primary_key
+
+              # `.search_options_groups` (e.g. Level#is_active?) needs real model
+              # instances, not the Owner-view rows below, so it always runs against
+              # the base records.
+              base_records = Array(limited_scope)
+
+              records =
+                if owner_klass
+                  ids = base_records.map { |record| record[primary_key] }
+                  owner_records_by_id = owner_klass.where(primary_key => ids).index_by { |record| record[primary_key] }
+                  owner_records = ids.map { |id| owner_records_by_id[id] }.compact
+
+                  base_records_by_id = base_records.index_by { |record| record[primary_key] }
+                  owner_records.each do |owner_record|
+                    base_record = base_records_by_id[owner_record[primary_key]]
+                    next unless base_record
+
+                    OWNER_OVERRIDE_METHODS.each do |method_name|
+                      next unless base_record.respond_to?(method_name)
+                      owner_record.public_send("#{method_name}=", base_record.public_send(method_name))
+                    end
+                  end
+
+                  owner_records
+                else
+                  base_records
+                end
 
               grouped_results =
                 if klass.respond_to?(:search_options_groups)
-                  klass.search_options_groups(records, opts).map { |label, group_records| { label: label, results: group_records } }
+                  records_by_id = records.index_by { |record| record[primary_key] }
+                  klass.search_options_groups(base_records, opts).map do |label, group_records|
+                    group_owner_records = group_records.map { |record| records_by_id[record[primary_key]] }.compact
+                    { label: label, results: group_owner_records }
+                  end
                 end
 
               { results: records, grouped_results: grouped_results }

@@ -336,6 +336,68 @@ describe ::HQ::GraphQL::Resource do
       end
     end
 
+    context "when an Owner-prefixed class exists for the model" do
+      let(:search_result_type) do
+        resource = advisor_resource
+        Class.new(::GraphQL::Schema::Object) do
+          graphql_name "AdvisorSearchResultType"
+          field :results, [resource.query_object], null: false
+          field :grouped_results, ::GraphQL::Types::JSON, null: true
+          field :result_class_names, [String], null: false
+
+          define_method(:result_class_names) { object[:results].map { |r| r.class.name } }
+        end
+      end
+
+      let(:search_query) {
+        <<-GRAPHQL
+          query {
+            advisorSearchOptions(query: "Bob") {
+              resultClassNames
+            }
+          }
+        GRAPHQL
+      }
+
+      before(:each) do
+        stub_const("OwnerAdvisor", Class.new(::ActiveRecord::Base) { self.table_name = "advisors" })
+
+        Advisor.define_singleton_method(:search_options) do |query, **_opts|
+          Advisor.where("name ILIKE ?", "%#{query}%")
+        end
+      end
+
+      after(:each) do
+        Advisor.singleton_class.remove_method(:search_options)
+      end
+
+      it "remaps results to the Owner-prefixed class by id" do
+        ::HQ::GraphQL.auto_register_search_options!
+
+        FactoryBot.create(:advisor, name: "Bob")
+
+        results = schema.execute(search_query)
+        class_names = results["data"]["advisorSearchOptions"]["resultClassNames"]
+
+        expect(class_names).to eq(["OwnerAdvisor"])
+      end
+
+      context "when the Owner-prefixed class has no primary key configured (e.g. a DB view)" do
+        before(:each) { OwnerAdvisor.primary_key = nil }
+
+        it "still remaps results to the Owner-prefixed class by id" do
+          ::HQ::GraphQL.auto_register_search_options!
+
+          FactoryBot.create(:advisor, name: "Bob")
+
+          results = schema.execute(search_query)
+          class_names = results["data"]["advisorSearchOptions"]["resultClassNames"]
+
+          expect(class_names).to eq(["OwnerAdvisor"])
+        end
+      end
+    end
+
     context "when the model doesn't define .search_options" do
       it "doesn't register the field" do
         ::HQ::GraphQL.auto_register_search_options!
