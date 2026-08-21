@@ -279,6 +279,152 @@ describe ::HQ::GraphQL::Resource do
     end
   end
 
+  describe ".search_options" do
+    let(:advisor_resource) do
+      Class.new do
+        include ::HQ::GraphQL::Resource
+        self.model_name = "Advisor"
+      end
+    end
+
+    let(:search_result_type) do
+      resource = advisor_resource
+      Class.new(::GraphQL::Schema::Object) do
+        graphql_name "AdvisorSearchResultType"
+        field :results, [resource.query_object], null: false
+        field :grouped_results, ::GraphQL::Types::JSON, null: true
+      end
+    end
+
+    let(:search_query) {
+      <<-GRAPHQL
+        query {
+          advisorSearchOptions(query: "Bob") {
+            results {
+              name
+            }
+          }
+        }
+      GRAPHQL
+    }
+
+    before(:each) do
+      allow(::HQ::GraphQL.config).to receive(:default_search_type) { search_result_type }
+    end
+
+    context "when the model defines .search_options" do
+      before(:each) do
+        Advisor.define_singleton_method(:search_options) do |query, **_opts|
+          Advisor.where("name ILIKE ?", "%#{query}%")
+        end
+      end
+
+      after(:each) do
+        Advisor.singleton_class.remove_method(:search_options)
+      end
+
+      it "auto-registers the field without an explicit call" do
+        ::HQ::GraphQL.auto_register_search_options!
+
+        FactoryBot.create(:advisor, name: "Alice")
+        bob = FactoryBot.create(:advisor, name: "Bob")
+
+        results = schema.execute(search_query)
+        names = results["data"]["advisorSearchOptions"]["results"].map { |r| r["name"] }
+
+        expect(names).to contain_exactly(bob.name)
+      end
+    end
+
+    context "when an Owner-prefixed class exists for the model" do
+      let(:search_result_type) do
+        resource = advisor_resource
+        Class.new(::GraphQL::Schema::Object) do
+          graphql_name "AdvisorSearchResultType"
+          field :results, [resource.query_object], null: false
+          field :grouped_results, ::GraphQL::Types::JSON, null: true
+          field :result_class_names, [String], null: false
+
+          define_method(:result_class_names) { object[:results].map { |r| r.class.name } }
+        end
+      end
+
+      let(:search_query) {
+        <<-GRAPHQL
+          query {
+            advisorSearchOptions(query: "Bob") {
+              resultClassNames
+            }
+          }
+        GRAPHQL
+      }
+
+      before(:each) do
+        stub_const("OwnerAdvisor", Class.new(::ActiveRecord::Base) { self.table_name = "advisors" })
+
+        Advisor.define_singleton_method(:search_options) do |query, **_opts|
+          Advisor.where("name ILIKE ?", "%#{query}%")
+        end
+      end
+
+      after(:each) do
+        Advisor.singleton_class.remove_method(:search_options)
+      end
+
+      it "remaps results to the Owner-prefixed class by id" do
+        ::HQ::GraphQL.auto_register_search_options!
+
+        FactoryBot.create(:advisor, name: "Bob")
+
+        results = schema.execute(search_query)
+        class_names = results["data"]["advisorSearchOptions"]["resultClassNames"]
+
+        expect(class_names).to eq(["OwnerAdvisor"])
+      end
+
+      context "when the Owner-prefixed class has no primary key configured (e.g. a DB view)" do
+        before(:each) { OwnerAdvisor.primary_key = nil }
+
+        it "still remaps results to the Owner-prefixed class by id" do
+          ::HQ::GraphQL.auto_register_search_options!
+
+          FactoryBot.create(:advisor, name: "Bob")
+
+          results = schema.execute(search_query)
+          class_names = results["data"]["advisorSearchOptions"]["resultClassNames"]
+
+          expect(class_names).to eq(["OwnerAdvisor"])
+        end
+      end
+    end
+
+    context "when the model doesn't define .search_options" do
+      it "doesn't register the field" do
+        ::HQ::GraphQL.auto_register_search_options!
+
+        expect(::HQ::GraphQL.root_queries.map { |q| q[:field_name] }).not_to include("advisor_search_options")
+      end
+    end
+
+    context "when a model gains .search_options after an earlier call" do
+      after(:each) do
+        if Advisor.respond_to?(:search_options)
+          Advisor.singleton_class.remove_method(:search_options)
+        end
+      end
+
+      it "picks it up on the next call -- stateless, no reset needed" do
+        ::HQ::GraphQL.auto_register_search_options!
+        expect(::HQ::GraphQL.root_queries.map { |q| q[:field_name] }).not_to include("advisor_search_options")
+
+        Advisor.define_singleton_method(:search_options) { |query, **_opts| Advisor.where(nil) }
+        ::HQ::GraphQL.auto_register_search_options!
+
+        expect(::HQ::GraphQL.root_queries.map { |q| q[:field_name] }).to include("advisor_search_options")
+      end
+    end
+  end
+
   describe ".excluded_inputs" do
     let(:advisor_resource) do
       Class.new do

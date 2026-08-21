@@ -63,6 +63,20 @@ module HQ
       lazy_load_classes.pop.lazy_load! while lazy_load_classes.length > 0
     end
 
+    # Registers the `search_options` root field for any resource whose model_klass
+    # already defines `.search_options`, so resources don't need to call it explicitly.
+    # Not wired to any hq-graphql lifecycle hook -- consuming apps call this themselves
+    # at whatever point their own boot process finalizes root_queries into real schema
+    # fields (that point varies per app; see e.g. agencieshq's
+    # z_graphql_resources_to_reload.rb). Stateless and safe to call repeatedly:
+    # Resource#search_options is idempotent per resource via @search_options_registered.
+    def self.auto_register_search_options!
+      resources.each do |resource|
+        next unless resource.model_klass.respond_to?(:search_options)
+        resource.send(:search_options)
+      end
+    end
+
     def self.lazy_load(klass)
       lazy_load_classes << klass unless lazy_load_classes.include?(klass)
     end

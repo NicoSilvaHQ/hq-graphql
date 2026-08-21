@@ -210,6 +210,93 @@ module HQ
           mutation_klasses["destroy_#{graphql_name.underscore}"] = build_destroy if destroy
         end
 
+        # search_options registers a dedicated root query field (e.g. `levelSearchOptions`)
+        # backed directly by the model's own `.search_options`/`.search_options_groups`.
+        # Auto-registered by `HQ::GraphQL.load_types!` for any resource whose model_klass
+        # already defines `.search_options`, so this rarely needs to be called explicitly.
+        # Parameters:
+        # field_name => overrides the generated field name
+        # default_limit => cap applied when the caller doesn't pass with: { limit: }
+        # type => the GraphQL type returned; defaults to HQ::GraphQL.config.default_search_type
+        #
+        # When an `Owner`-prefixed class exists for the model (e.g. `OwnerLevel` for
+        # `Level`), results are re-fetched through it by id so callers get the owner
+        # view instead of the base model instances. This is a separate class/table
+        # (e.g. a DB-view-backed model), not a subclass, so records are remapped by id
+        # rather than cast in place -- the original order and limit are preserved. If
+        # the base model itself defines `#sub_item_type` or `#abbreviation` (used for
+        # search-suggestion display, when the Owner view can't compute them in SQL),
+        # those override whatever the Owner view returned for that record.
+        OWNER_OVERRIDE_METHODS = %i[sub_item_type abbreviation].freeze
+
+        def search_options(field_name: nil, default_limit: 15, type: nil)
+          return if @search_options_registered
+
+          resource = self
+          field_name ||= "#{graphql_name.underscore}_search_options"
+          result_type = type || ::HQ::GraphQL.config.default_search_type
+          raise ArgumentError, "no type given and no default_search_type configured" unless result_type
+
+          def_root field_name, is_array: false, null: false do
+            type result_type, null: false
+
+            argument :query, String, required: false
+            argument :with, ::GraphQL::Types::JSON, required: false
+
+            define_method(:resolve) do |query: nil, with: nil|
+              klass = resource.model_klass
+              owner_klass = "Owner#{klass.name}".safe_constantize
+              opts = (with || {}).deep_symbolize_keys
+
+              scope = klass.search_options(query, organization_id: context[:current_organization]&.id, with: opts)
+              limit = Integer(opts[:limit]) rescue default_limit
+              is_relation = scope.respond_to?(:limit)
+              limited_scope = is_relation ? scope.limit(limit) : scope
+              primary_key = klass.primary_key
+
+              # `.search_options_groups` (e.g. Level#is_active?) needs real model
+              # instances, not the Owner-view rows below, so it always runs against
+              # the base records.
+              base_records = Array(limited_scope)
+
+              records =
+                if owner_klass
+                  ids = base_records.map { |record| record[primary_key] }
+                  owner_records_by_id = owner_klass.where(primary_key => ids).index_by { |record| record[primary_key] }
+                  owner_records = ids.map { |id| owner_records_by_id[id] }.compact
+
+                  base_records_by_id = base_records.index_by { |record| record[primary_key] }
+                  owner_records.each do |owner_record|
+                    base_record = base_records_by_id[owner_record[primary_key]]
+                    next unless base_record
+
+                    OWNER_OVERRIDE_METHODS.each do |method_name|
+                      next unless base_record.respond_to?(method_name)
+                      owner_record.public_send("#{method_name}=", base_record.public_send(method_name))
+                    end
+                  end
+
+                  owner_records
+                else
+                  base_records
+                end
+
+              grouped_results =
+                if klass.respond_to?(:search_options_groups)
+                  records_by_id = records.index_by { |record| record[primary_key] }
+                  klass.search_options_groups(base_records, opts).map do |label, group_records|
+                    group_owner_records = group_records.map { |record| records_by_id[record[primary_key]] }.compact
+                    { label: label, results: group_owner_records }
+                  end
+                end
+
+              { results: records, grouped_results: grouped_results }
+            end
+          end
+
+          @search_options_registered = true
+        end
+
         def query(**options, &block)
           @query_object_options = [options, block]
         end
